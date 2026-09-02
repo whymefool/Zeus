@@ -3976,6 +3976,11 @@ class MainWindow(QMainWindow):
         self.hud.speaking = (state == "SPEAKING")
 
     def _check_config(self) -> bool:
+        # A key supplied via the process environment satisfies readiness on its
+        # own — it is read here only to test non-emptiness, never printed,
+        # logged, displayed, or written to config/api_keys.json.
+        if os.environ.get("GEMINI_API_KEY", "").strip():
+            return True
         if not API_FILE.exists(): return False
         try:
             d = json.loads(API_FILE.read_text(encoding="utf-8"))
