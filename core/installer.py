@@ -12,6 +12,8 @@ import subprocess
 import sys
 from typing import Callable
 
+from core.safe_mode import SAFE_LOCAL_MODE
+
 # ── Package lists ─────────────────────────────────────────────────────────
 # Each entry: (import_name, pip_package_name)
 
@@ -116,6 +118,21 @@ def install_for_config(config: dict, log: Callable | None = None) -> None:
         return
 
     pkg_names = ", ".join(p for _, p in missing)
+
+    if SAFE_LOCAL_MODE:
+        # Safe local mode: never invoke pip at runtime. Report exactly what is
+        # missing and stop — the operator installs it explicitly and reruns.
+        msg = (
+            f"SYS: {len(missing)} package(s) missing and NOT installed "
+            f"(automatic installation is disabled in safe local mode): {pkg_names}. "
+            f"Install manually with: pip install {' '.join(p for _, p in missing)}"
+        )
+        if log:
+            log(msg)
+        else:
+            print(msg)
+        return
+
     if log:
         log(f"SYS: Installing {len(missing)} package(s): {pkg_names}")
 

@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -44,6 +45,9 @@ def load_api_keys() -> dict:
         return {}
 
 def get_gemini_key() -> str | None:
+    env_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if env_key:
+        return env_key
     return load_api_keys().get("gemini_api_key")
 
 def is_configured() -> bool:

@@ -83,6 +83,7 @@ from core.plugin_loader        import discover_plugins
 from core                      import undo as undo_stack
 from core                      import confirm as confirm_gate
 from core                      import audio_devices
+from core.safe_mode            import SAFE_LOCAL_MODE, ALLOWED_TOOLS, BLOCKED_MESSAGE
 
 def get_base_dir():
     if getattr(sys, "frozen", False):
@@ -121,6 +122,10 @@ def _pcm_level(samples) -> float:
 
 
 def _get_api_key() -> str:
+    import os
+    env_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if env_key:
+        return env_key
     with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
         return json.load(f)["gemini_api_key"]
 
@@ -770,6 +775,7 @@ class JarvisLive:
         self._plugin_registry = discover_plugins(
             plugins_dir=Path(__file__).resolve().parent / "plugins",
             core_tool_names=_core_names,
+            disabled=SAFE_LOCAL_MODE,   # safe local mode: no plugin file is imported/executed
             logger=lambda msg: (print(f"[Plugins] {msg}"), self.ui.write_log(f"SYS: {msg}")),
         )
         self.ui.get_plugins = self._plugin_registry.list_for_ui
@@ -1000,6 +1006,20 @@ class JarvisLive:
 
         print(f"[JARVIS] 🔧 {name}  {args}")
         self.ui.set_state("THINKING")
+
+        # ── Safe local mode: central tool-dispatch allowlist ──────────────
+        # Enforced here in code, not left to the model's own judgement, so a
+        # blocked tool never reaches its implementation (core tool, plugin,
+        # file/computer/browser control, dev_agent, dashboard relay, etc.)
+        # regardless of what the prompt or a plugin claims about itself.
+        if SAFE_LOCAL_MODE and name not in ALLOWED_TOOLS:
+            print(f"[SafeMode] Blocked tool call: {name}")
+            if not self.ui.muted:
+                self.ui.set_state("LISTENING")
+            return types.FunctionResponse(
+                id=fc.id, name=name,
+                response={"result": BLOCKED_MESSAGE}
+            )
 
         if name == "save_memory":
             category = args.get("category", "notes")
@@ -1824,16 +1844,25 @@ class JarvisLive:
         audio_devices.prefetch()
 
         # Start dashboard (optional — needs: pip install fastapi "uvicorn[standard]" cryptography)
-        try:
-            from dashboard.server import DashboardServer
-            self._dashboard = DashboardServer()
-            self._dashboard.set_connect_callback(self._on_phone_connected)
-            asyncio.create_task(self._dashboard.serve())
-            # Runs for the whole lifetime, not just inside an active session
-            asyncio.create_task(self._process_dashboard_commands())
-        except Exception as e:
-            print(f"[Dashboard] Disabled: {e}")
+        # Safe local mode: the remote dashboard is never imported, constructed, or
+        # served — no listening socket, no bind to 0.0.0.0, no _ensure_network_access
+        # call, no firewall/UAC prompt. self._dashboard stays None, which also
+        # disables the phone-audio relay and dashboard-command relay tasks below
+        # (both are gated on `if self._dashboard:`).
+        if not SAFE_LOCAL_MODE:
+            try:
+                from dashboard.server import DashboardServer
+                self._dashboard = DashboardServer()
+                self._dashboard.set_connect_callback(self._on_phone_connected)
+                asyncio.create_task(self._dashboard.serve())
+                # Runs for the whole lifetime, not just inside an active session
+                asyncio.create_task(self._process_dashboard_commands())
+            except Exception as e:
+                print(f"[Dashboard] Disabled: {e}")
+                self._dashboard = None
+        else:
             self._dashboard = None
+            self.ui.write_log("SYS: Remote dashboard disabled in safe local mode.")
 
         while True:
             try:
@@ -1886,8 +1915,12 @@ class JarvisLive:
                     tg.create_task(self._receive_audio())
                     tg.create_task(self._play_audio())
                     tg.create_task(self._run_system_monitor())
-                    tg.create_task(self._run_background_monitor())
-                    tg.create_task(self._run_proactive_mode())
+                    if not SAFE_LOCAL_MODE:
+                        # Safe local mode: no background topic monitoring, no
+                        # proactive check-ins — the model only speaks in
+                        # direct response to the user.
+                        tg.create_task(self._run_background_monitor())
+                        tg.create_task(self._run_proactive_mode())
                     if self._dashboard:
                         tg.create_task(self._relay_phone_audio())
 

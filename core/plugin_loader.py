@@ -130,14 +130,23 @@ def _validate(module, filename: str) -> PluginRecord:
 
 
 def discover_plugins(plugins_dir: Path, core_tool_names: set[str],
-                      logger: Callable[[str], None] = print) -> PluginRegistry:
+                      logger: Callable[[str], None] = print,
+                      disabled: bool = False) -> PluginRegistry:
     """
     Scans plugins_dir for *.py files (skips files starting with '_', e.g. __init__.py,
     _template.py, and any shared-helper modules an author prefixes with '_').
     Import errors, validation errors, and name collisions are logged and the offending
     file is skipped — they NEVER raise out of this function and never abort the scan
     of remaining files.
+
+    disabled=True (safe local mode) skips the scan entirely: no plugin file is
+    opened, imported, or exec'd, and an empty registry is returned. This is a
+    hard stop before any importlib call, not a post-hoc filter.
     """
+    if disabled:
+        logger("Plugin discovery disabled (safe local mode) — no plugin files were imported.")
+        return PluginRegistry({}, logger)
+
     plugins_dir.mkdir(parents=True, exist_ok=True)
     valid: dict[str, PluginRecord] = {}
     all_records: list[PluginRecord] = []
