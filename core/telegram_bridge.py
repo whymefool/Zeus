@@ -136,7 +136,10 @@ class TelegramBridge:
                 return ""
             text = (self._transcribe(r.content, voice.get("mime_type") or "audio/ogg") or "").strip()
         except Exception as e:
-            self._log(f"Telegram: voice note failed ({type(e).__name__}).")
+            # Type + HTTP status only: the exception text can embed the request URL.
+            code = getattr(e, "code", None) or getattr(getattr(e, "response", None), "status_code", None)
+            status = getattr(e, "status", None)
+            self._log(f"Telegram: voice note failed ({type(e).__name__} {code or ''} {status or ''}).".replace("  ", " "))
             self.send("Sorry, I couldn't understand that voice note.")
             return ""
         if not text:
