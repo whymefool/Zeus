@@ -882,18 +882,39 @@ class JarvisLive:
             self._loop
         )
 
+    _stt_model = "gemini-2.5-flash"   # replaced by discovery if the server says 404
+
     @staticmethod
-    def _transcribe_voice(data: bytes, mime: str) -> str:
+    def _pick_stt_model(client) -> str:
+        """Newest plain Flash model this key can call with generateContent."""
+        skip = ("live", "audio", "tts", "image", "embedding", "lite", "exp", "thinking")
+        names = []
+        for m in client.models.list():
+            n = (m.name or "").removeprefix("models/")
+            if "flash" in n and "generateContent" in (getattr(m, "supported_actions", None) or []) \
+                    and not any(s in n for s in skip):
+                names.append(n)
+        if not names:
+            raise RuntimeError("no usable speech model")
+        return sorted(names)[-1]
+
+    @classmethod
+    def _transcribe_voice(cls, data: bytes, mime: str) -> str:
         """Speech-to-text for Telegram voice notes (runs on the bridge thread)."""
         client = genai.Client(api_key=_get_api_key())
-        resp = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[
-                types.Part.from_bytes(data=data, mime_type=mime),
-                "Transcribe this audio exactly, in the language spoken. "
-                "Output only the transcript, nothing else.",
-            ],
-        )
+        contents = [
+            types.Part.from_bytes(data=data, mime_type=mime),
+            "Transcribe this audio exactly, in the language spoken. "
+            "Output only the transcript, nothing else.",
+        ]
+        try:
+            resp = client.models.generate_content(model=cls._stt_model, contents=contents)
+        except genai.errors.ClientError as e:
+            if getattr(e, "code", None) != 404:
+                raise
+            cls._stt_model = cls._pick_stt_model(client)
+            print(f"[Telegram] Speech model not found; using {cls._stt_model}")
+            resp = client.models.generate_content(model=cls._stt_model, contents=contents)
         return (resp.text or "").strip()
 
     def _on_telegram_command(self, text: str) -> bool:
