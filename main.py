@@ -882,6 +882,20 @@ class JarvisLive:
             self._loop
         )
 
+    @staticmethod
+    def _transcribe_voice(data: bytes, mime: str) -> str:
+        """Speech-to-text for Telegram voice notes (runs on the bridge thread)."""
+        client = genai.Client(api_key=_get_api_key())
+        resp = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[
+                types.Part.from_bytes(data=data, mime_type=mime),
+                "Transcribe this audio exactly, in the language spoken. "
+                "Output only the transcript, nothing else.",
+            ],
+        )
+        return (resp.text or "").strip()
+
     def _on_telegram_command(self, text: str) -> bool:
         """Called from the Telegram thread. Returns False if no live session."""
         if not self._loop or not self.session:
@@ -1887,6 +1901,7 @@ class JarvisLive:
             self._telegram = TelegramBridge.from_env(
                 self._on_telegram_command,
                 log=lambda m: self.ui.write_log(f"SYS: {m}"),
+                transcribe=self._transcribe_voice,
             )
             if self._telegram:
                 self._telegram.start()

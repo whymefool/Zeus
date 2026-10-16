@@ -32,6 +32,8 @@ import requests
 _API = "https://api.telegram.org/bot{token}/{method}"
 _POLL_TIMEOUT = 30          # seconds the server holds a getUpdates call open
 _MAX_LEN = 4000             # Telegram caps a message at 4096 characters
+_MAX_VOICE_SECONDS = 60     # longer voice notes are refused
+_MAX_VOICE_BYTES = 2_000_000
 
 
 def is_authorized(update: dict, owner_id: int) -> bool:
@@ -61,23 +63,25 @@ class TelegramBridge:
         owner_id: int,
         on_command: Callable[[str], bool],
         log: Callable[[str], None] = print,
+        transcribe: Callable[[bytes, str], str] | None = None,
     ):
         self._token = token
         self._owner_id = owner_id
         self._on_command = on_command   # returns False if JARVIS can't take it now
         self._log = log
+        self._transcribe = transcribe   # (audio bytes, mime) -> text; None disables voice notes
         self._offset: int | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
     @classmethod
-    def from_env(cls, on_command, log=print) -> "TelegramBridge | None":
+    def from_env(cls, on_command, log=print, transcribe=None) -> "TelegramBridge | None":
         token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
         owner = os.environ.get("TELEGRAM_OWNER_ID", "").strip()
         if not token or not owner:
             return None
         try:
-            return cls(token, int(owner), on_command, log)
+            return cls(token, int(owner), on_command, log, transcribe)
         except ValueError:
             log("Telegram: TELEGRAM_OWNER_ID must be a number — bridge disabled.")
             return None
@@ -112,6 +116,33 @@ class TelegramBridge:
         r.raise_for_status()
         return r.json()
 
+    def _voice_to_text(self, voice: dict) -> str:
+        """Download a voice note and transcribe it. Returns '' (after telling
+        the owner why) if it can't be used. Audio stays in memory only."""
+        if self._transcribe is None:
+            self.send("Voice notes aren't enabled.")
+            return ""
+        if (voice.get("duration") or 0) > _MAX_VOICE_SECONDS:
+            self.send(f"Voice note too long (max {_MAX_VOICE_SECONDS}s).")
+            return ""
+        try:
+            info = self._call("getFile", {"file_id": voice["file_id"]}, timeout=15)
+            path = info["result"]["file_path"]
+            url = f"https://api.telegram.org/file/bot{self._token}/{path}"
+            r = requests.get(url, timeout=30)
+            r.raise_for_status()
+            if len(r.content) > _MAX_VOICE_BYTES:
+                self.send("Voice note too large.")
+                return ""
+            text = (self._transcribe(r.content, voice.get("mime_type") or "audio/ogg") or "").strip()
+        except Exception as e:
+            self._log(f"Telegram: voice note failed ({type(e).__name__}).")
+            self.send("Sorry, I couldn't understand that voice note.")
+            return ""
+        if not text:
+            self.send("I couldn't hear anything in that voice note.")
+        return text
+
     def _skip_backlog(self) -> None:
         data = self._call("getUpdates", {"offset": -1, "timeout": 0}, timeout=15)
         results = data.get("result") or []
@@ -145,9 +176,16 @@ class TelegramBridge:
         if not is_authorized(upd, self._owner_id):
             self._log("Telegram: ignored a message from an unauthorized sender.")
             return
-        text = (upd["message"].get("text") or "").strip()
+        msg = upd["message"]
+        text = (msg.get("text") or "").strip()
+        voice = msg.get("voice")
+        if not text and voice:
+            text = self._voice_to_text(voice)
+            if not text:
+                return
+            self.send(f"Heard: {text}")   # echo so a mis-transcription is visible
         if not text:
-            self.send("I can only read text messages.")
+            self.send("I can read text and voice messages only.")
             return
         self._log("Telegram: command received.")
         if not self._on_command(text):
