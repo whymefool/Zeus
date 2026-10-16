@@ -84,6 +84,7 @@ from core                      import undo as undo_stack
 from core                      import confirm as confirm_gate
 from core                      import audio_devices
 from core.safe_mode            import SAFE_LOCAL_MODE, ALLOWED_TOOLS, BLOCKED_MESSAGE
+from core.telegram_bridge      import TelegramBridge
 
 def get_base_dir():
     if getattr(sys, "frozen", False):
@@ -764,7 +765,9 @@ class JarvisLive:
         self._resume_handle: str | None = None
         self._turn_done_event: asyncio.Event | None = None
         self._dashboard     = None
-        self._briefing_sent    = False          # morning briefing fires once per process
+        self._telegram         = None    # owner-only Telegram bridge (env-configured, optional)
+        self._tg_pending       = False   # True while a Telegram command awaits its reply
+        self._briefing_sent    = False         # morning briefing fires once per process
         self._sys_monitor      = SystemMonitor()  # persistent cooldown state
         self._proactive        = ProactiveEngine()
         self._last_user_speech = time.monotonic()  # updated on every user utterance
@@ -878,6 +881,14 @@ class JarvisLive:
             ),
             self._loop
         )
+
+    def _on_telegram_command(self, text: str) -> bool:
+        """Called from the Telegram thread. Returns False if no live session."""
+        if not self._loop or not self.session:
+            return False
+        self._tg_pending = True
+        self._on_text_command(text)
+        return True
 
     def set_speaking(self, value: bool):
         with self._speaking_lock:
@@ -1372,6 +1383,11 @@ class JarvisLive:
                                         "text": full_out,
                                         "ts": datetime.now().isoformat(),
                                     }))
+                            if full_out and self._tg_pending and self._telegram:
+                                self._tg_pending = False
+                                asyncio.get_running_loop().run_in_executor(
+                                    None, self._telegram.send, full_out
+                                )
                             out_buf = []
 
                             # Vision injection: model finished tool-response turn → now send the image
@@ -1863,6 +1879,17 @@ class JarvisLive:
         else:
             self._dashboard = None
             self.ui.write_log("SYS: Remote dashboard disabled in safe local mode.")
+
+        # Owner-only Telegram control. Starts only when TELEGRAM_BOT_TOKEN and
+        # TELEGRAM_OWNER_ID are both set in the environment; otherwise a no-op.
+        # Tool calls it triggers still pass through the safe-mode gate.
+        if self._telegram is None:
+            self._telegram = TelegramBridge.from_env(
+                self._on_telegram_command,
+                log=lambda m: self.ui.write_log(f"SYS: {m}"),
+            )
+            if self._telegram:
+                self._telegram.start()
 
         while True:
             try:
